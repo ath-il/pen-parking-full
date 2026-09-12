@@ -176,7 +176,7 @@ curl http://localhost:5000/api/camera/frame
 
 ## 11. Demo
 
-![images/demo1.mp4]
+![https://drive.google.com/file/d/1M3SDuiwAYoXqhALIqGPMRC-SfGVLM-jC/view?usp=sharing]
 *The video demonstrates real-time pen detection, alignment scoring, and the final parking result.*
 
 ## 12. Team Contributions
