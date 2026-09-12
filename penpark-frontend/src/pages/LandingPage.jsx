@@ -11,10 +11,10 @@ export default function LandingPage() {
     error,
     penData,
     backendOnline,
-    snapshotUrl,
+    videoFeedUrl,
     startCamera,
     stopCamera,
-  } = useBackendCamera({ pollInterval: 300, frameInterval: 80 });
+  } = useBackendCamera({ pollInterval: 250 });
 
   const [isStopping, setIsStopping] = useState(false);
   const [cameraMode, setCameraMode] = useState("laptop");
@@ -212,10 +212,10 @@ export default function LandingPage() {
 
           <div className="camera-frame-wrapper">
             <div className="camera-frame">
-              {snapshotUrl ? (
+              {videoFeedUrl ? (
                 <img
-                  src={snapshotUrl}
-                  alt="Live webcam with pen detection"
+                  src={videoFeedUrl}
+                  alt="Live camera"
                   className="camera-video"
                 />
               ) : (

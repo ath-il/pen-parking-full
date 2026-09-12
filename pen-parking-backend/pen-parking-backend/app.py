@@ -25,6 +25,7 @@ CORS(app)
 camera_lock = Lock()
 cap = None
 latest_frame = None
+latest_jpeg = None
 latest_pen_data = None
 camera_active = False
 camera_ready = Event()
@@ -42,6 +43,9 @@ def init_camera():
     if not cap.isOpened():
         print(f"Warning: Could not open camera source: {camera_source}")
         return False
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     print(f"Camera initialized from: {camera_source}")
     return True
 
@@ -102,9 +106,37 @@ def annotate_frame(frame, pen_data):
     return annotated
 
 
-def camera_worker():
-    """Background thread to continuously read from camera"""
-    global latest_frame, latest_pen_data, camera_active, camera_init_error
+def _pack_pen_data(pen, frame_shape):
+    target = get_target_position(frame_shape)
+    if not pen:
+        return {"detected": False, "target": target}
+
+    cx, cy = pen["center"]
+    angle = pen["angle"]
+    score, dx, dy, distance = compute_score((cx, cy), angle, target)
+    return {
+        "detected": True,
+        "center": {"x": cx, "y": cy},
+        "bbox": {
+            "x": pen["bbox"][0],
+            "y": pen["bbox"][1],
+            "width": pen["bbox"][2],
+            "height": pen["bbox"][3],
+        },
+        "angle": float(angle),
+        "area": float(pen["area"]),
+        "score": float(score),
+        "distance": float(distance),
+        "dx": float(dx),
+        "dy": float(dy),
+        "instruction": get_instruction(dx, dy),
+        "target": target,
+    }
+
+
+def capture_worker():
+    """Only capture and publish JPEG. Never waits on detection."""
+    global latest_frame, latest_jpeg, camera_active, camera_init_error, cap
 
     camera_ready.clear()
     camera_init_error = None
@@ -114,85 +146,82 @@ def camera_worker():
         return
 
     camera_active = True
-    camera_ready.set()
+
+    while camera_active:
+        if cap is None:
+            break
+
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.01)
+            continue
+
+        height, width = frame.shape[:2]
+        if width > 640:
+            frame = cv2.resize(frame, (640, int(height * 640 / width)), interpolation=cv2.INTER_AREA)
+
+        with camera_lock:
+            latest_frame = frame
+            pen_data = latest_pen_data
+
+        annotated = annotate_frame(frame, pen_data)
+        ok, buffer = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 55])
+        if ok:
+            with camera_lock:
+                latest_jpeg = buffer.tobytes()
+            if not camera_ready.is_set():
+                camera_ready.set()
+
+
+def detect_worker():
+    """Run pen detection on a copy of the latest frame without blocking capture."""
+    global latest_pen_data
+
     last_pen = None
     missed_frames = 0
 
     while camera_active:
         with camera_lock:
-            ret, frame = cap.read()
-            if not ret:
-                print("Camera read failed")
-                break
-            
-            latest_frame = frame.copy()
-            
-            target = get_target_position(frame.shape)
-            pen = detect_pen(frame, last_pen)
+            frame = None if latest_frame is None else latest_frame.copy()
 
-            if pen:
-                last_pen = pen
-                missed_frames = 0
-            elif last_pen is not None and missed_frames < 12:
-                pen = last_pen
-                missed_frames += 1
-            else:
-                last_pen = None
-                missed_frames = 0
-                pen = None
-            
-            if pen:
-                cx, cy = pen["center"]
-                angle = pen["angle"]
-                score, dx, dy, distance = compute_score((cx, cy), angle, target)
-                instruction = get_instruction(dx, dy)
-                
-                latest_pen_data = {
-                    "detected": True,
-                    "center": {"x": cx, "y": cy},
-                    "bbox": {
-                        "x": pen["bbox"][0],
-                        "y": pen["bbox"][1],
-                        "width": pen["bbox"][2],
-                        "height": pen["bbox"][3],
-                    },
-                    "angle": float(angle),
-                    "area": float(pen["area"]),
-                    "score": float(score),
-                    "distance": float(distance),
-                    "dx": float(dx),
-                    "dy": float(dy),
-                    "instruction": instruction,
-                    "target": target,
-                }
-            else:
-                latest_pen_data = {
-                    "detected": False,
-                    "target": get_target_position(frame.shape),
-                }
+        if frame is None:
+            time.sleep(0.02)
+            continue
+
+        pen = detect_pen(frame, last_pen)
+        if pen:
+            last_pen = pen
+            missed_frames = 0
+        elif last_pen is not None and missed_frames < 6:
+            pen = last_pen
+            missed_frames += 1
+        else:
+            last_pen = None
+            missed_frames = 0
+            pen = None
+
+        packed = _pack_pen_data(pen, frame.shape)
+        with camera_lock:
+            latest_pen_data = packed
+
+        time.sleep(0.04)
 
 
 def generate_frames():
-    """Generator function for streaming video frames"""
+    """Stream the latest pre-encoded JPEG."""
     while camera_active:
         with camera_lock:
-            if latest_frame is None:
-                time.sleep(0.05)
-                continue
-            frame = annotate_frame(latest_frame, latest_pen_data)
-
-        ret, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if not ret:
+            payload = latest_jpeg
+        if not payload:
+            time.sleep(0.02)
             continue
-        frame_bytes = buffer.tobytes()
-
         yield (
             b"--frame\r\n"
             b"Content-Type: image/jpeg\r\n\r\n"
-            + frame_bytes
+            + payload
             + b"\r\n"
         )
-        time.sleep(0.033)
+        time.sleep(0.04)
 
 
 # ==================== API Routes ====================
@@ -224,7 +253,7 @@ def start_camera():
             cap.release()
             cap = None
 
-    camera_thread = Thread(target=camera_worker, daemon=True)
+    camera_thread = Thread(target=capture_worker, daemon=True)
     camera_thread.start()
 
     wait_seconds = 15 if requested_camera_source and str(requested_camera_source).startswith("http") else 8
@@ -237,6 +266,8 @@ def start_camera():
             "error": camera_init_error or "Camera failed to start. Check phone IP, WiFi, and /video URL."
         }), 500
 
+    Thread(target=detect_worker, daemon=True).start()
+
     return jsonify({
         "status": "Camera started",
         "message": "Camera stream initialized",
@@ -247,7 +278,7 @@ def start_camera():
 @app.route("/api/camera/stop", methods=["POST"])
 def stop_camera():
     """Stop camera streaming"""
-    global camera_active, cap, latest_frame, latest_pen_data
+    global camera_active, cap, latest_frame, latest_pen_data, latest_jpeg
 
     camera_active = False
     camera_ready.clear()
@@ -255,6 +286,7 @@ def stop_camera():
         cap.release()
         cap = None
     latest_frame = None
+    latest_jpeg = None
     latest_pen_data = None
 
     return jsonify({"status": "Camera stopped"})
@@ -283,18 +315,21 @@ def get_frame():
 
 @app.route("/api/camera/snapshot")
 def camera_snapshot():
-    """Return a single annotated JPEG frame (best for browser polling)."""
-    if not camera_active or latest_frame is None:
+    """Return the latest pre-encoded JPEG (no extra processing)."""
+    if not camera_active or latest_jpeg is None:
         return jsonify({"error": "No frame available"}), 404
 
     with camera_lock:
-        frame = annotate_frame(latest_frame, latest_pen_data)
+        payload = latest_jpeg
 
-    ret, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    if not ret:
-        return jsonify({"error": "Failed to encode frame"}), 500
-
-    return Response(buffer.tobytes(), mimetype="image/jpeg")
+    return Response(
+        payload,
+        mimetype="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @app.route("/api/camera/video_feed")

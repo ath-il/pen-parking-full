@@ -49,11 +49,9 @@ def normalize_camera_source(source):
 def open_camera(source):
     try:
         if source is None:
-            return cv2.VideoCapture(0)
-
-        source_str = str(source).strip()
-        if not source_str:
-            return cv2.VideoCapture(0)
+            source_str = "0"
+        else:
+            source_str = str(source).strip() or "0"
 
         if source_str.startswith(("http://", "https://", "rtsp://", "rtmp://")):
             cap = cv2.VideoCapture(source_str, cv2.CAP_FFMPEG)
@@ -63,14 +61,22 @@ def open_camera(source):
             return cap
 
         if source_str.isdigit():
-            return cv2.VideoCapture(int(source_str))
+            index = int(source_str)
+            cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(index)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            return cap
 
         if os.path.exists(source_str):
             return cv2.VideoCapture(source_str)
 
         return cv2.VideoCapture(source_str)
     except Exception:
-        return cv2.VideoCapture(0)
+        return cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
 
 def get_target_position(frame_shape):
@@ -79,25 +85,6 @@ def get_target_position(frame_shape):
         "x": int(w * TARGET_RATIO_X),
         "y": int(h * TARGET_RATIO_Y),
     }
-
-
-def _line_kernel(length, angle_deg):
-    size = length + 4
-    kernel = np.zeros((size, size), dtype=np.uint8)
-    center = size // 2
-    rad = np.deg2rad(angle_deg)
-    dx = int(round(np.cos(rad) * (length / 2)))
-    dy = int(round(np.sin(rad) * (length / 2)))
-    cv2.line(kernel, (center - dx, center - dy), (center + dx, center + dy), 1, 1)
-    return kernel
-
-
-def _enhance_thin_objects(binary):
-    enhanced = np.zeros_like(binary)
-    for angle in range(0, 180, 10):
-        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, _line_kernel(21, angle))
-        enhanced = cv2.bitwise_or(enhanced, opened)
-    return enhanced
 
 
 def _candidate_from_min_rect(rect, contour=None):
@@ -141,80 +128,53 @@ def _score_candidate(candidate, previous=None):
 
 
 def detect_pen(frame, previous=None):
-    """Detect a pen by shape (long, thin stick), not by color."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    """Detect a pen by shape on a small grayscale frame."""
+    h, w = frame.shape[:2]
+    scale = 1.0
+    max_w = 320
+    work = frame
+    if w > max_w:
+        scale = w / float(max_w)
+        work = cv2.resize(frame, (max_w, int(h / scale)), interpolation=cv2.INTER_AREA)
 
-    dark_pen = cv2.adaptiveThreshold(
-        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 7
-    )
-    light_pen = cv2.adaptiveThreshold(
-        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 7
-    )
-    edges = cv2.Canny(blurred, 25, 80)
+    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 50, 140)
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
 
-    combined = cv2.bitwise_or(dark_pen, light_pen)
-    combined = cv2.bitwise_or(combined, edges)
-    combined = cv2.medianBlur(combined, 3)
-    combined = _enhance_thin_objects(combined)
-    combined = cv2.dilate(combined, np.ones((3, 3), np.uint8), iterations=1)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=1)
+    previous_scaled = None
+    if previous:
+        previous_scaled = {
+            "center": (
+                int(previous["center"][0] / scale),
+                int(previous["center"][1] / scale),
+            )
+        }
 
     candidates = []
-
-    contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for contour in contours:
         area = cv2.contourArea(contour)
-        if area < 80 or area > 40000:
+        if area < 40 or area > 20000:
             continue
         candidate = _candidate_from_min_rect(cv2.minAreaRect(contour), contour)
         if candidate:
             candidates.append(candidate)
 
-    lines = cv2.HoughLinesP(
-        combined,
-        rho=1,
-        theta=np.pi / 180,
-        threshold=40,
-        minLineLength=70,
-        maxLineGap=18,
-    )
-    if lines is not None:
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            length = float(np.hypot(x2 - x1, y2 - y1))
-            if length < 70:
-                continue
-            cx = (x1 + x2) / 2
-            cy = (y1 + y2) / 2
-            angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
-            pad = 10
-            x = min(x1, x2) - pad
-            y = min(y1, y2) - pad
-            w = abs(x2 - x1) + pad * 2
-            h = abs(y2 - y1) + pad * 2
-            candidate = {
-                "center": (int(cx), int(cy)),
-                "bbox": (int(x), int(y), int(w), int(h)),
-                "angle": angle,
-                "area": float(length * 12),
-                "length": length,
-                "aspect": min(length / 10.0, 16.0),
-            }
-            candidates.append(candidate)
-
     if not candidates:
         return None
 
-    best = max(candidates, key=lambda item: _score_candidate(item, previous))
+    best = max(candidates, key=lambda item: _score_candidate(item, previous_scaled))
     return {
-        "center": best["center"],
-        "bbox": best["bbox"],
+        "center": (int(best["center"][0] * scale), int(best["center"][1] * scale)),
+        "bbox": (
+            int(best["bbox"][0] * scale),
+            int(best["bbox"][1] * scale),
+            int(best["bbox"][2] * scale),
+            int(best["bbox"][3] * scale),
+        ),
         "angle": best["angle"],
-        "area": best["area"],
+        "area": float(best["area"] * scale * scale),
     }
 
 

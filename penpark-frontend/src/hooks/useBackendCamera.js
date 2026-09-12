@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import api from "../services/api";
 
-export default function useBackendCamera({ pollInterval = 300, frameInterval = 100 } = {}) {
+export default function useBackendCamera({ pollInterval = 250 } = {}) {
   const [isActive, setIsActive] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [penData, setPenData] = useState(null);
   const [backendOnline, setBackendOnline] = useState(null);
-  const [snapshotTick, setSnapshotTick] = useState(0);
+  const [feedKey, setFeedKey] = useState(0);
   const pollRef = useRef(null);
-  const frameRef = useRef(null);
+  const activeRef = useRef(false);
 
   const checkBackend = useCallback(async () => {
     try {
@@ -26,9 +26,8 @@ export default function useBackendCamera({ pollInterval = 300, frameInterval = 1
     try {
       const data = await api.getFrame();
       setPenData(data);
-      setError(null);
     } catch {
-      // Frame may not be ready yet right after start
+      // Detection data may not be ready yet
     }
   }, []);
 
@@ -45,37 +44,30 @@ export default function useBackendCamera({ pollInterval = 300, frameInterval = 1
 
     try {
       await api.startCamera(source);
+      activeRef.current = true;
+      setFeedKey(Date.now());
       setIsActive(true);
-      setSnapshotTick(Date.now());
 
       if (pollRef.current) clearInterval(pollRef.current);
-      if (frameRef.current) clearInterval(frameRef.current);
-
       pollRef.current = setInterval(pollFrame, pollInterval);
-      frameRef.current = setInterval(() => {
-        setSnapshotTick(Date.now());
-      }, frameInterval);
-
-      setTimeout(pollFrame, 500);
+      setTimeout(pollFrame, 200);
 
       return true;
     } catch (err) {
       setError(err.message || "Failed to start camera");
+      activeRef.current = false;
       setIsActive(false);
       return false;
     } finally {
       setIsLoading(false);
     }
-  }, [checkBackend, pollFrame, pollInterval, frameInterval]);
+  }, [checkBackend, pollFrame, pollInterval]);
 
   const stopCamera = useCallback(async () => {
+    activeRef.current = false;
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
-    }
-    if (frameRef.current) {
-      clearInterval(frameRef.current);
-      frameRef.current = null;
     }
 
     try {
@@ -86,22 +78,15 @@ export default function useBackendCamera({ pollInterval = 300, frameInterval = 1
 
     setIsActive(false);
     setPenData(null);
-    setSnapshotTick(0);
+    setFeedKey(0);
   }, []);
 
   useEffect(() => {
     checkBackend();
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
-      if (frameRef.current) clearInterval(frameRef.current);
-      api.stopCamera().catch(() => {});
     };
   }, [checkBackend]);
-
-  const snapshotUrl =
-    isActive && snapshotTick
-      ? `${api.snapshotUrl()}?t=${snapshotTick}`
-      : null;
 
   return {
     isActive,
@@ -109,7 +94,7 @@ export default function useBackendCamera({ pollInterval = 300, frameInterval = 1
     error,
     penData,
     backendOnline,
-    snapshotUrl,
+    videoFeedUrl: feedKey ? `${api.videoFeedUrl()}?t=${feedKey}` : null,
     startCamera,
     stopCamera,
     checkBackend,
