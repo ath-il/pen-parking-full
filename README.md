@@ -10,8 +10,8 @@ A real-time computer vision system that detects the position, angle, and alignme
 Thalipoli
 
 ### Team Members
-- Team Lead: Muhammad Jasim PC
-- Member: Athil Rahuman A S
+- Team Lead: Muhammad Jasim PC - TKM College of Engineering
+- Member: Athil Rahuman A S - TKM College of Engineering
 
 ### Project Description
 PenPark is an intelligent pen-parking detection system designed to verify whether a pen is correctly aligned in a target zone using computer vision. It reads live camera input, tracks the pen, calculates center position, angle deviation, and alignment score, and sends real-time instructions back to the user.
