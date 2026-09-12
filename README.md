@@ -171,12 +171,12 @@ curl http://localhost:5000/api/camera/frame
 
 ## 10. Workflow Diagram
 
-![Workflow Diagram](architecture.png)
+![Workflow Diagram](images/architecture.png)
 *The workflow shows camera input, computer vision processing, scoring logic, and frontend updates.*
 
 ## 11. Demo
 
-![/home/jasim/Documents/useless_project_temp/demo1.mp4]
+![images/demo1.mp4]
 *The video demonstrates real-time pen detection, alignment scoring, and the final parking result.*
 
 ## 12. Team Contributions
