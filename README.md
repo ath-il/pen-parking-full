@@ -171,7 +171,7 @@ curl http://localhost:5000/api/camera/frame
 
 ## 10. Workflow Diagram
 
-(images/archtecture.png)
+![https://drive.google.com/file/d/1p2SzDCtfvFWWne58kVPsCfDKS8SiKzZY/view?usp=sharing]
 *The workflow shows camera input, computer vision processing, scoring logic, and frontend updates.*
 
 ## 11. Demo
